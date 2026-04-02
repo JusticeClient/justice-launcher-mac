@@ -1,0 +1,37 @@
+directories:
+  output: dist
+  buildResources: build
+appId: com.justice.launcher
+productName: Justice Launcher
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: assets/icon.icns
+  category: public.app-category.games
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+dmg:
+  title: Justice Launcher
+  icon: assets/icon.icns
+  contents:
+    - x: 130
+      'y': 220
+    - x: 410
+      'y': 220
+      type: link
+      path: /Applications
+files:
+  - filter:
+      - '**/*'
+      - '!node_modules/*/{CHANGELOG.md,README.md,readme.md,readme}'
+extraResources:
+  - from: nova-theme.zip
+    to: nova-theme.zip
+  - from: bundled-mods/justice
+    to: bundled-mods/justice
+electronVersion: 28.3.3

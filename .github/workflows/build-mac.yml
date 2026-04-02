@@ -1,0 +1,44 @@
+name: Build Justice Launcher (macOS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS DMG
+        run: npm run build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: justice-launcher-mac-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Upload blockmap
+        uses: actions/upload-artifact@v4
+        with:
+          name: justice-launcher-mac-blockmap
+          path: dist/*.blockmap
+          if-no-files-found: ignore
