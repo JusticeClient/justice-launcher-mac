@@ -358,6 +358,7 @@ function extractNatives(versionJson, nativesDir) {
   const platform = process.platform;
   const osKey = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'osx' : 'linux';
   const osKeyNew = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'macos' : 'linux';
+  const arch = process.arch; // 'x64' or 'arm64'
   const nativeExts = new Set(['.dll', '.so', '.dylib', '.jnilib']);
   const nativeJars = new Set();
   let extracted = 0;
@@ -366,13 +367,33 @@ function extractNatives(versionJson, nativesDir) {
     if (lib.downloads?.artifact?.path) {
       const p = lib.downloads.artifact.path;
       if (p.includes(`natives-${osKeyNew}`) || p.includes(`natives-${osKey}`)) {
-        const jarPath = path.join(LIBRARIES_DIR, p);
-        if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
+        // On macOS arm64, prefer arm64-specific jars; skip x64-only if arm64 variant exists
+        if (platform === 'darwin' && arch === 'arm64') {
+          // Always add arm64-specific jars
+          if (p.includes('arm64')) {
+            const jarPath = path.join(LIBRARIES_DIR, p);
+            if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
+          } else {
+            // Add non-arm64 (generic/x64) jar only as fallback — check if arm64 variant exists
+            const arm64Path = p.replace('natives-macos', 'natives-macos-arm64');
+            const arm64Full = path.join(LIBRARIES_DIR, arm64Path);
+            if (!fs.existsSync(arm64Full)) {
+              // No arm64 variant, use the generic one (may contain universal binaries)
+              const jarPath = path.join(LIBRARIES_DIR, p);
+              if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
+            }
+          }
+        } else {
+          // Windows/Linux/x64 Mac — skip arm64 jars
+          if (platform === 'darwin' && p.includes('arm64')) continue;
+          const jarPath = path.join(LIBRARIES_DIR, p);
+          if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
+        }
       }
     }
     if (lib.natives && lib.downloads?.classifiers) {
-      const arch = process.arch === 'x64' ? '64' : '32';
-      const fromNatives = lib.natives[osKey]?.replace('${arch}', arch);
+      const archBits = arch === 'x64' ? '64' : '32';
+      const fromNatives = lib.natives[osKey]?.replace('${arch}', archBits);
       const generic = getNativeClassifier();
       const keys = [...new Set([fromNatives, generic].filter(Boolean))];
       for (const key of keys) {
@@ -398,7 +419,7 @@ function extractNatives(versionJson, nativesDir) {
         if (skipPrefixes.some(p => name.startsWith(p))) continue;
         if (!nativeExts.has(ext)) continue;
         const outPath = path.join(nativesDir, path.basename(name));
-        const needsWrite = !fs.existsSync(outPath) || fs.statSync(outPath).size === 0;
+        const needsWrite = !fs.existsSync(outPath) || fs.statSync(outPath).size === 0 || fs.statSync(outPath).size !== entry.header.size;
         if (needsWrite) {
           try {
             fs.writeFileSync(outPath, entry.getData());
@@ -420,12 +441,16 @@ function buildClasspath(versionJson) {
   for (const lib of (versionJson.libraries || [])) {
     if (!evalLibRules(lib.rules)) continue;
     if (lib.natives && !lib.downloads?.artifact) continue;
+    let added = false;
+    // Try official downloads path first
     if (lib.downloads?.artifact?.path) {
       const p = path.join(LIBRARIES_DIR, lib.downloads.artifact.path);
-      if (fs.existsSync(p)) cp.push(p);
-    } else if (lib.name && !lib.downloads) {
+      if (fs.existsSync(p)) { cp.push(p); added = true; }
+    }
+    // Fallback: resolve via maven coordinates (covers Fabric libs and any lib with name but missing/incomplete downloads)
+    if (!added && lib.name) {
       const p = path.join(LIBRARIES_DIR, mavenToPath(lib.name));
-      if (fs.existsSync(p)) cp.push(p);
+      if (fs.existsSync(p)) { cp.push(p); added = true; }
     }
   }
   return cp;
@@ -952,6 +977,7 @@ ipcMain.handle('launch-game', async (event, { versionId, username, ram, serverAd
     const jvmArgs = [
       `-Xmx${ram || 2048}M`, `-Xms512M`,
       `-Djava.library.path=${nativesDir}`,
+      `-Dorg.lwjgl.librarypath=${nativesDir}`,
       `-Djna.tmpdir=${nativesDir}`,
       `-Dorg.lwjgl.system.SharedLibraryExtractPath=${nativesDir}`,
       `-Dio.netty.native.workdir=${nativesDir}`,
@@ -1013,7 +1039,7 @@ ipcMain.handle('launch-game', async (event, { versionId, username, ram, serverAd
       jvmArgs.push(...extra);
     }
     const args = [...jvmArgs, '-cp', finalCp.join(path.delimiter), mainClass, ...gameArgs];
-    const java = spawn(javaPath, args, { detached: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    const java = spawn(javaPath, args, { cwd: instDir, detached: false, stdio: ['ignore', 'pipe', 'pipe'] });
     java.stdout.on('data', d => log(d.toString()));
     java.stderr.on('data', d => log(d.toString()));
     java.on('error', err => {
