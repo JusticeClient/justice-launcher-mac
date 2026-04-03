@@ -359,6 +359,25 @@ function extractNatives(versionJson, nativesDir) {
   const osKey = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'osx' : 'linux';
   const osKeyNew = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'macos' : 'linux';
   const arch = process.arch; // 'x64' or 'arm64'
+  // Check if natives were extracted for a different architecture — if so, wipe and re-extract
+  const archMarker = path.join(nativesDir, '.arch');
+  const currentArch = `${platform}-${arch}`;
+  if (fs.existsSync(archMarker)) {
+    try {
+      const prevArch = fs.readFileSync(archMarker, 'utf8').trim();
+      if (prevArch !== currentArch) {
+        // Wrong architecture — delete all native files and re-extract
+        fs.readdirSync(nativesDir).forEach(f => {
+          try { fs.unlinkSync(path.join(nativesDir, f)); } catch (_) { }
+        });
+      }
+    } catch (_) { }
+  } else if (fs.readdirSync(nativesDir).length > 0) {
+    // No marker but files exist (from before this fix) — wipe to be safe
+    fs.readdirSync(nativesDir).forEach(f => {
+      try { fs.unlinkSync(path.join(nativesDir, f)); } catch (_) { }
+    });
+  }
   const nativeExts = new Set(['.dll', '.so', '.dylib', '.jnilib']);
   const nativeJars = new Set();
   let extracted = 0;
@@ -429,6 +448,8 @@ function extractNatives(versionJson, nativesDir) {
       }
     } catch (_) { }
   }
+  // Write arch marker so we know what arch these natives are for
+  try { fs.writeFileSync(archMarker, currentArch); } catch (_) { }
   return { jarCount: nativeJars.size, extracted };
 }
 function mavenToPath(name) {
