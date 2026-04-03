@@ -359,54 +359,41 @@ function extractNatives(versionJson, nativesDir) {
   const osKey = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'osx' : 'linux';
   const osKeyNew = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'macos' : 'linux';
   const arch = process.arch; // 'x64' or 'arm64'
-  // Check if natives were extracted for a different architecture — if so, wipe and re-extract
+  // Always wipe natives and re-extract fresh to avoid stale/wrong-arch files
   const archMarker = path.join(nativesDir, '.arch');
   const currentArch = `${platform}-${arch}`;
+  let needsClean = false;
   if (fs.existsSync(archMarker)) {
     try {
       const prevArch = fs.readFileSync(archMarker, 'utf8').trim();
-      if (prevArch !== currentArch) {
-        // Wrong architecture — delete all native files and re-extract
-        fs.readdirSync(nativesDir).forEach(f => {
-          try { fs.unlinkSync(path.join(nativesDir, f)); } catch (_) { }
-        });
-      }
-    } catch (_) { }
-  } else if (fs.readdirSync(nativesDir).length > 0) {
-    // No marker but files exist (from before this fix) — wipe to be safe
+      if (prevArch !== currentArch) needsClean = true;
+    } catch (_) { needsClean = true; }
+  } else if (fs.readdirSync(nativesDir).filter(f => !f.startsWith('.')).length > 0) {
+    needsClean = true;
+  }
+  if (needsClean) {
     fs.readdirSync(nativesDir).forEach(f => {
       try { fs.unlinkSync(path.join(nativesDir, f)); } catch (_) { }
     });
   }
   const nativeExts = new Set(['.dll', '.so', '.dylib', '.jnilib']);
-  const nativeJars = new Set();
+  // Collect ALL native JARs for this OS (both x64 and arm64)
+  const nativeJarsGeneric = [];  // x64 / generic
+  const nativeJarsArch = [];     // arm64-specific (processed LAST to overwrite)
   let extracted = 0;
   for (const lib of (versionJson.libraries || [])) {
     if (!evalLibRules(lib.rules)) continue;
     if (lib.downloads?.artifact?.path) {
       const p = lib.downloads.artifact.path;
       if (p.includes(`natives-${osKeyNew}`) || p.includes(`natives-${osKey}`)) {
-        // On macOS arm64, prefer arm64-specific jars; skip x64-only if arm64 variant exists
-        if (platform === 'darwin' && arch === 'arm64') {
-          // Always add arm64-specific jars
-          if (p.includes('arm64')) {
-            const jarPath = path.join(LIBRARIES_DIR, p);
-            if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
+        const jarPath = path.join(LIBRARIES_DIR, p);
+        if (fs.existsSync(jarPath)) {
+          // Sort: arch-specific JARs go last so they overwrite generic ones
+          if (p.includes('arm64') || p.includes('aarch64')) {
+            nativeJarsArch.push(jarPath);
           } else {
-            // Add non-arm64 (generic/x64) jar only as fallback — check if arm64 variant exists
-            const arm64Path = p.replace('natives-macos', 'natives-macos-arm64');
-            const arm64Full = path.join(LIBRARIES_DIR, arm64Path);
-            if (!fs.existsSync(arm64Full)) {
-              // No arm64 variant, use the generic one (may contain universal binaries)
-              const jarPath = path.join(LIBRARIES_DIR, p);
-              if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
-            }
+            nativeJarsGeneric.push(jarPath);
           }
-        } else {
-          // Windows/Linux/x64 Mac — skip arm64 jars
-          if (platform === 'darwin' && p.includes('arm64')) continue;
-          const jarPath = path.join(LIBRARIES_DIR, p);
-          if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
         }
       }
     }
@@ -419,16 +406,23 @@ function extractNatives(versionJson, nativesDir) {
         const a = lib.downloads.classifiers[key];
         if (a?.path) {
           const jarPath = path.join(LIBRARIES_DIR, a.path);
-          if (fs.existsSync(jarPath)) nativeJars.add(jarPath);
-          else {
-            if (a.url) nativeJars._pending = nativeJars._pending || [];
+          if (fs.existsSync(jarPath)) {
+            if (key.includes('arm64') || key.includes('aarch64')) {
+              nativeJarsArch.push(jarPath);
+            } else {
+              nativeJarsGeneric.push(jarPath);
+            }
           }
         }
       }
     }
   }
+  // On arm64: extract generic first, then arm64 overwrites. On x64: only extract generic.
+  const jarsToExtract = arch === 'arm64'
+    ? [...nativeJarsGeneric, ...nativeJarsArch]
+    : nativeJarsGeneric;
   const skipPrefixes = ['META-INF/', 'module-info'];
-  for (const jarPath of nativeJars) {
+  for (const jarPath of jarsToExtract) {
     try {
       const zip = new AdmZip(jarPath);
       for (const entry of zip.getEntries()) {
@@ -438,19 +432,16 @@ function extractNatives(versionJson, nativesDir) {
         if (skipPrefixes.some(p => name.startsWith(p))) continue;
         if (!nativeExts.has(ext)) continue;
         const outPath = path.join(nativesDir, path.basename(name));
-        const needsWrite = !fs.existsSync(outPath) || fs.statSync(outPath).size === 0 || fs.statSync(outPath).size !== entry.header.size;
-        if (needsWrite) {
-          try {
-            fs.writeFileSync(outPath, entry.getData());
-            extracted++;
-          } catch (_) { }
-        }
+        try {
+          fs.writeFileSync(outPath, entry.getData());
+          extracted++;
+        } catch (_) { }
       }
     } catch (_) { }
   }
-  // Write arch marker so we know what arch these natives are for
+  // Write arch marker
   try { fs.writeFileSync(archMarker, currentArch); } catch (_) { }
-  return { jarCount: nativeJars.size, extracted };
+  return { jarCount: jarsToExtract.length, extracted };
 }
 function mavenToPath(name) {
   const [group, artifact, version] = name.split(':');
@@ -946,9 +937,28 @@ ipcMain.handle('launch-game', async (event, { versionId, username, ram, serverAd
         });
       }
     }
+    // On macOS arm64, ensure arm64 native JARs are downloaded (may be missing if installed on older build)
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      const nativeLibs = (parentJson || vJson).libraries || [];
+      const missingArm64 = [];
+      for (const lib of nativeLibs) {
+        if (!lib.downloads?.artifact?.path) continue;
+        const p = lib.downloads.artifact.path;
+        if (p.includes('natives-macos-arm64') || p.includes('natives-macos-aarch64')) {
+          const dest = path.join(LIBRARIES_DIR, p);
+          if (!fs.existsSync(dest) && lib.downloads.artifact.url) {
+            missingArm64.push({ url: lib.downloads.artifact.url, dest });
+          }
+        }
+      }
+      if (missingArm64.length > 0) {
+        log(`Downloading ${missingArm64.length} missing arm64 native libraries...\n`);
+        await downloadBatch(missingArm64, 8, () => {});
+      }
+    }
     log('Extracting natives...\n');
     const nativeResult = extractNatives(parentJson || vJson, nativesDir);
-    const nativeFilesOnDisk = fs.existsSync(nativesDir) ? fs.readdirSync(nativesDir).length : 0;
+    const nativeFilesOnDisk = fs.existsSync(nativesDir) ? fs.readdirSync(nativesDir).filter(f => !f.startsWith('.')).length : 0;
     log(`Natives: scanned ${nativeResult.jarCount} native JARs, extracted ${nativeResult.extracted} new files (${nativeFilesOnDisk} total on disk)\n`);
     if (nativeFilesOnDisk === 0) log('WARNING: No natives on disk! LWJGL will likely fail.\n');
     function deduplicateCp(entries) {
