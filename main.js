@@ -6,6 +6,17 @@ const https = require('https');
 const http = require('http');
 const { spawn, execSync } = require('child_process');
 const AdmZip = require('adm-zip');
+// Detect REAL hardware architecture (not Electron binary arch, which may differ under Rosetta)
+function getHardwareArch() {
+  if (process.platform === 'darwin') {
+    try {
+      const real = require('child_process').execSync('uname -m', { encoding: 'utf8' }).trim();
+      if (real === 'arm64') return 'arm64';
+    } catch (_) {}
+  }
+  return process.arch;
+}
+const REAL_ARCH = getHardwareArch();
 app.setPath('userData', path.join(os.homedir(), '.justice-launcher', 'electron-data'));
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 app.commandLine.appendSwitch('disk-cache-dir', path.join(os.homedir(), '.justice-launcher', 'electron-cache'));
@@ -336,7 +347,7 @@ async function downloadBatch(tasks, concurrency, onProgress) {
   await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker(queue)));
 }
 function getNativeClassifier() {
-  const p = process.platform, a = process.arch;
+  const p = process.platform, a = REAL_ARCH;
   if (p === 'win32') return a === 'x64' ? 'natives-windows' : 'natives-windows-x86';
   if (p === 'darwin') return a === 'arm64' ? 'natives-macos-arm64' : 'natives-macos';
   return 'natives-linux';
@@ -358,7 +369,7 @@ function extractNatives(versionJson, nativesDir) {
   const platform = process.platform;
   const osKey = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'osx' : 'linux';
   const osKeyNew = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'macos' : 'linux';
-  const arch = process.arch; // 'x64' or 'arm64'
+  const arch = REAL_ARCH; // 'x64' or 'arm64' (real hardware, not Electron binary)
   // Always wipe natives and re-extract fresh to avoid stale/wrong-arch files
   const archMarker = path.join(nativesDir, '.arch');
   const currentArch = `${platform}-${arch}`;
@@ -806,7 +817,7 @@ async function installVanilla(mcVersion, onStep, customNameArg, skipSave = false
       libTasks.push({ url: lib.downloads.artifact.url, dest: path.join(LIBRARIES_DIR, lib.downloads.artifact.path) });
     if (lib.downloads?.classifiers) {
       const osKey = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
-      const arch = process.arch === 'x64' ? '64' : '32';
+      const arch = REAL_ARCH === 'x64' ? '64' : '32';
       const wantedKeys = new Set([
         lib.natives?.[osKey]?.replace('${arch}', arch),
         `natives-${osKey === 'osx' ? 'macos' : osKey}`,
@@ -938,7 +949,7 @@ ipcMain.handle('launch-game', async (event, { versionId, username, ram, serverAd
       }
     }
     // On macOS arm64, ensure arm64 native JARs are downloaded (may be missing if installed on older build)
-    if (process.platform === 'darwin' && process.arch === 'arm64') {
+    if (process.platform === 'darwin' && REAL_ARCH === 'arm64') {
       const nativeLibs = (parentJson || vJson).libraries || [];
       const missingArm64 = [];
       for (const lib of nativeLibs) {
